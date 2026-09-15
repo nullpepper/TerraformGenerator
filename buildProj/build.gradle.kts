@@ -10,17 +10,8 @@ buildscript {
 
 dependencies {
     implementation(project(":common"))
-    implementation(project(":implementation:v1_18_R2"))
-    implementation(project(":implementation:v1_19_R3"))
-    implementation(project(":implementation:v1_20_R1"))
-    implementation(project(":implementation:v1_20_R2"))
-    implementation(project(":implementation:v1_20_R3"))
-    implementation(project(":implementation:v1_20_R4"))
-    implementation(project(":implementation:v1_21_R1"))
-    implementation(project(":implementation:v1_21_R2"))
-    implementation(project(":implementation:v1_21_R3"))
-    implementation(project(":implementation:v1_21_R4"))
-    implementation(project(":implementation:v1_21_R5"))
+    // 只打 1.21.9+ 与 26.x：manifest 用 mojang 命名空间，1.21.9 之前的模块即使打进去也用不了
+    // （见下方 shadowJar 的注释）。老版本模块已从 settings.gradle.kts 移除。
     implementation(project(":implementation:v1_21_R6"))
     implementation(project(":implementation:v1_21_R7"))
     implementation(project(":implementation:v26_1"))

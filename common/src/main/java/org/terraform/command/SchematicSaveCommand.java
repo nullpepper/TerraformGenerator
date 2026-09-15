@@ -26,7 +26,9 @@ public class SchematicSaveCommand extends TerraCommand {
 
     @Override
     public @NotNull String getDefaultDescription() {
-        return "Saves a schematic in the schematics folder in plugins/TerraformGenerator";
+        // 别写死 plugins/TerraformGenerator：数据文件夹可能被自定义加载器放到别处
+        return "Saves a schematic in the schematics folder in "
+               + TerraformGeneratorPlugin.get().getDataFolder().getPath();
     }
 
     @Override

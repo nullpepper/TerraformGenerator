@@ -24,11 +24,9 @@ public class TLogger {
             try {
                 // Creating consoleHandler and fileHandler
                 consoleHandler = new ConsoleHandler();
-                fileHandler = new FileHandler("plugins"
-                                              + File.separator
-                                              + "TerraformGenerator"
-                                              + File.separator
-                                              + "terraform.log", true);
+                // Derive from the plugin's data folder instead of a hardcoded
+                // "plugins/TerraformGenerator" path, so custom plugin loaders work.
+                fileHandler = new FileHandler(new File(TerraformGeneratorPlugin.get().getDataFolder(), "terraform.log").getPath(), true);
 
                 // Follow bukkit format
                 fileHandler.setFormatter(new SimpleFormatter() {

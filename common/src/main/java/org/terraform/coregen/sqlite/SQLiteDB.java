@@ -27,6 +27,17 @@ public class SQLiteDB {
     }
 
     /**
+     * Resolves the SQLite database file for a world.
+     * <p>
+     * The path is derived from the plugin's own data folder instead of a hardcoded
+     * {@code plugins/TerraformGenerator} prefix, so custom plugin loaders that place
+     * the data folder elsewhere keep working.
+     */
+    private static @NotNull File getDatabaseFile(@NotNull String world) {
+        return new File(TerraformGeneratorPlugin.get().getDataFolder(), world + ".db");
+    }
+
+    /**
      * Ensures that the database and all relevant tables exist.
      */
     public static void createTableIfNotExists(String world) {
@@ -34,7 +45,7 @@ public class SQLiteDB {
             return;
         }
         Connection conn = null;
-        String dir = "plugins" + File.separator + "TerraformGenerator" + File.separator + world + ".db";
+        String dir = getDatabaseFile(world).getPath();
         try {
             // db parameters  
             String url = "jdbc:sqlite:" + dir;
@@ -84,7 +95,7 @@ public class SQLiteDB {
      */
     public void updateBlockData(String world, int chunkX, int chunkZ, int x, int y, int z, @NotNull BlockData data) {
         createTableIfNotExists(world);
-        String dir = "plugins" + File.separator + "TerraformGenerator" + File.separator + world + ".db";
+        String dir = getDatabaseFile(world).getPath();
         String CHUNK = chunkX + "," + chunkZ;
         String COORDS = x + "," + y + "," + z;
         String DATA = data.toString();
@@ -122,7 +133,7 @@ public class SQLiteDB {
      */
     public boolean[] fetchFromChunks(String world, int chunkX, int chunkZ) {
         createTableIfNotExists(world);
-        String dir = "plugins" + File.separator + "TerraformGenerator" + File.separator + world + ".db";
+        String dir = getDatabaseFile(world).getPath();
         String key = chunkX + "," + chunkZ;
         boolean[] queryReply = {false, false};
         try {
@@ -155,7 +166,7 @@ public class SQLiteDB {
      */
     public void putChunk(String world, int chunkX, int chunkZ, boolean populated) {
         createTableIfNotExists(world);
-        String dir = "plugins" + File.separator + "TerraformGenerator" + File.separator + world + ".db";
+        String dir = getDatabaseFile(world).getPath();
         try {
             Class.forName("org.sqlite.JDBC");
             Connection c = DriverManager.getConnection("jdbc:sqlite:" + dir);

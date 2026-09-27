@@ -9,11 +9,13 @@ include("implementation:v1_21_R6")
 include("implementation:v1_21_R7")
 include("implementation:v26_1")
 include("implementation:v26_2")
+include("implementation:v26_3")
 
 // Spigot 变体默认不构建（需要 buildtools 产物），按需用 -PincludeSpigot 打开
 // include("implementation:Spigotv1_21_R6")
 // include("implementation:Spigotv1_21_R7")
 // include("implementation:Spigotv26_1")
 // include("implementation:Spigotv26_2")
+// include("implementation:Spigotv26_3")
 
 include("buildProj")

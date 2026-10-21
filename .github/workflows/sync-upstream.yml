@@ -1,0 +1,212 @@
+name: Sync with upstream
+
+# 上游（父仓库）发布 release / 打 tag / 推提交时，GitHub 不会给 fork 发任何事件，
+# 所以「上游一发 release 就同步」只能靠这里定时轮询上游来判断。
+#
+# 同步策略：优先用 GitHub 服务端的 merge-upstream 接口（网页「Sync fork」按钮背后的接口）。
+# 必须在服务端做——GITHUB_TOKEN 没有 workflows 权限，本地推送一旦涉及
+# .github/workflows/ 下的改动就会被拒。
+on:
+  schedule:
+    # 每天一次（UTC 04:17 = 北京时间 12:17，避开整点排队）
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "即使分支已是最新，也照常走一遍同步流程"
+        type: boolean
+        default: false
+      sync_tags:
+        description: "同时把上游的 tags 同步到 fork（Release 页面仍然不会同步）"
+        type: boolean
+        default: true
+      target_branch:
+        description: "要更新的分支，留空 = 仓库默认分支（一般不用改）"
+        type: string
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [upstream-release]
+
+permissions:
+  contents: write
+  # 上游的提交可能改到 .github/workflows/ 下的文件；
+  # 缺这个权限时推送会被拒：
+  # "refusing to allow a GitHub App to create or update workflow ... without `workflows` permission"
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      # 注意：workflow_dispatch 的事件负载里 parent 字段是空的，
+      # 所以这里只作为初值，真正的上游在「解析仓库信息」步骤里用 API 兜底确认。
+      EVENT_PARENT: ${{ github.event.repository.parent.full_name }}
+      FORK: ${{ github.repository }}
+      TARGET: ${{ inputs.target_branch || github.event.repository.default_branch }}
+    steps:
+      - name: 解析仓库信息
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upstream="${EVENT_PARENT:-}"
+          if [ -z "$upstream" ]; then
+            # workflow_dispatch / schedule 走这里：问 API 要父仓库
+            upstream=$(gh api "repos/$FORK" --jq '.parent.full_name // ""' 2>/dev/null || true)
+          fi
+          if [ -z "$upstream" ] || [ "$upstream" = "$FORK" ]; then
+            echo "::error::$FORK 不是 fork（找不到父仓库），没有上游可同步。"
+            exit 1
+          fi
+          echo "上游: $upstream"
+          echo "fork: $FORK"
+          echo "目标分支: $TARGET"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+
+      - name: 判断目标分支是否落后上游
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ steps.meta.outputs.upstream }}
+        run: |
+          behind=""
+          # 快速短路：如果上游最新 release 的 tag 还没进 fork，那一定需要同步
+          tag=$(gh api "repos/$UPSTREAM/releases" \
+                  --jq '[.[] | select(.prerelease == false)][0].tag_name' 2>/dev/null || true)
+          if [ -n "$tag" ]; then
+            if ! gh api "repos/$FORK/git/ref/tags/$tag" >/dev/null 2>&1; then
+              echo "→ fork 上还没有 tag $tag，需要同步"
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # 真正的判据：比较两个分支的 commit sha
+          fork_sha=$(gh api "repos/$FORK/branches/$TARGET" --jq '.commit.sha' 2>/dev/null || true)
+          up_sha=$(gh api "repos/$UPSTREAM/branches/$TARGET" --jq '.commit.sha' 2>/dev/null || true)
+          echo "上游 $TARGET: ${up_sha:-<无此分支>}"
+          echo "fork $TARGET: ${fork_sha:-<无此分支>}"
+          if [ -z "$up_sha" ]; then
+            echo "::error::上游没有 $TARGET 分支，无法同步。可用 target_branch 指定别的分支。"
+            exit 1
+          fi
+          if [ "$fork_sha" = "$up_sha" ]; then
+            echo "→ 已与上游一致，无需同步"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "→ fork 与上游不一致，需要同步"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: 决定是否执行同步
+        id: decide
+        env:
+          FORCE: ${{ inputs.force }}
+          NEEDED: ${{ steps.detect.outputs.needed }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # repository_dispatch 是你主动发信号，说明「就是要现在同步」
+          if [ "$EVENT" = "repository_dispatch" ] || [ "$FORCE" = "true" ] || [ "$NEEDED" = "true" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "跳过：分支已与上游一致。手动同步请在 Actions 页面 Run workflow 时勾选 force。"
+          fi
+
+      - name: 检出 fork
+        if: steps.decide.outputs.go == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: 配置 git 身份
+        if: steps.decide.outputs.go == 'true'
+        run: |
+          # runner 上默认没有 git 身份，不设置的话 git merge 会报
+          # "fatal: empty ident name ... not allowed"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 拉取上游
+        if: steps.decide.outputs.go == 'true'
+        env:
+          UPSTREAM: ${{ steps.meta.outputs.upstream }}
+        run: |
+          git remote add upstream "https://github.com/$UPSTREAM.git" 2>/dev/null \
+            || git remote set-url upstream "https://github.com/$UPSTREAM.git"
+          git fetch --no-tags upstream "+refs/heads/*:refs/remotes/upstream/*"
+          git fetch --tags upstream
+
+      - name: 服务端同步目标分支（保留你自己的分支）
+        id: merge
+        if: steps.decide.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ steps.meta.outputs.upstream }}
+          TARGET: ${{ env.TARGET }}
+        run: |
+          set -euo pipefail
+          # 注意：这里不能用「上游必须有同名分支」做前置拦截。
+          # 服务端 merge-upstream 接口按父仓库的同名分支处理，上游没有该分支时
+          # 它自己会返回「已是最新」；用本地 ref 判断反而会把这种正常场景误杀
+          # （例如只存在于 fork 的分支，或上游还没建同名分支）。
+          if git rev-parse --verify --quiet "refs/remotes/upstream/$TARGET" >/dev/null; then
+            behind=$(git rev-list --count "HEAD..upstream/$TARGET")
+            ahead=$(git rev-list --count "upstream/$TARGET..HEAD")
+            echo "本地 $TARGET 落后上游 $behind 个提交，领先 $ahead 个提交"
+            echo "上游最新提交: $(git log -1 --format='%h %s' "upstream/$TARGET")"
+            if [ "$behind" = "0" ]; then
+              echo "已经是最新，无需同步。"
+              echo "mode=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            echo "上游没有 $TARGET 分支；交由服务端接口判断（通常会返回已是最新）。"
+          fi
+
+          # 用 GitHub 服务端的 merge-upstream 接口同步（网页「Sync fork」按钮背后的接口）。
+          # 该接口对非默认分支同样有效（实测返回 fast-forward）。
+          out=$(gh api -X POST "repos/$FORK/merge-upstream" -f branch="$TARGET" 2>&1) || {
+            echo "::error::merge-upstream 失败（常见原因：上游与本地改动冲突）。"
+            echo "$out"
+            echo "::error::处理办法：把你自己的改动挪到别的分支，或手动解决冲突后再重跑。"
+            exit 1
+          }
+          echo "服务端同步结果: $out"
+          echo "mode=api-merge" >> "$GITHUB_OUTPUT"
+
+      - name: 同步 tags（可选）
+        if: steps.decide.outputs.go == 'true' && inputs.sync_tags != false
+        env:
+          UPSTREAM: ${{ steps.meta.outputs.upstream }}
+        run: |
+          # 注意：这里只会把 tag 推过去，GitHub Release 记录不会跟着出现。
+          git fetch --tags upstream
+          git push --tags --force-with-lease origin || true
+
+      - name: 汇总
+        if: always()
+        run: |
+          {
+            echo "## 同步结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 上游 | \`${{ steps.meta.outputs.upstream }}\` |"
+            echo "| fork | \`$FORK\` |"
+            echo "| 目标分支 | \`$TARGET\` |"
+            echo "| 上游最新 release | \`${{ steps.detect.outputs.tag }}\` |"
+            echo "| 是否需要同步 | ${{ steps.detect.outputs.needed }} |"
+            echo "| 是否执行同步 | ${{ steps.decide.outputs.go }} |"
+            echo "| 同步方式 | ${{ steps.merge.outputs.mode }} |"
+            echo "| 结论 | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

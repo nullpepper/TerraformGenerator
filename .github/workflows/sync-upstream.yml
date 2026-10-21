@@ -175,14 +175,34 @@ jobs:
 
           # 用 GitHub 服务端的 merge-upstream 接口同步（网页「Sync fork」按钮背后的接口）。
           # 该接口对非默认分支同样有效（实测返回 fast-forward）。
-          out=$(gh api -X POST "repos/$FORK/merge-upstream" -f branch="$TARGET" 2>&1) || {
+          if out=$(gh api -X POST "repos/$FORK/merge-upstream" -f branch="$TARGET" 2>&1); then
+            echo "服务端同步结果: $out"
+            echo "mode=api-merge" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$out" | grep -q 'without .workflows. permission'; then
+            # GITHUB_TOKEN 没有 workflows 权限，上游一旦改到 .github/workflows/ 就会被 422 拒绝。
+            # 退回到本地合并，并把 .github/workflows 保持成本 fork 的版本（不采纳上游 workflow 改动），
+            # 这样 push 的 diff 不涉及 workflow 文件，GITHUB_TOKEN 就能推。
+            echo "::warning::服务端接口因 workflow 权限被拒，改用本地合并（保留本 fork 的 .github/workflows）"
+            merge_rc=0
+            git merge --no-commit --no-ff "upstream/$TARGET" || merge_rc=$?
+            git reset -q HEAD -- .github/workflows 2>/dev/null || true
+            git checkout HEAD -- .github/workflows 2>/dev/null || true
+            git clean -fdq .github/workflows 2>/dev/null || true
+            if [ "$merge_rc" -ne 0 ] && git ls-files -u | grep -v '\.github/workflows/' | grep -q .; then
+              echo "::error::存在非 workflow 文件的合并冲突，需要手动处理："
+              git diff --name-only --diff-filter=U
+              exit 1
+            fi
+            git add -A
+            git commit -m "merge: 同步上游 $TARGET（保留本地 workflow 配置）"
+            git push origin "HEAD:$TARGET"
+            echo "mode=local-merge" >> "$GITHUB_OUTPUT"
+          else
             echo "::error::merge-upstream 失败（常见原因：上游与本地改动冲突）。"
             echo "$out"
             echo "::error::处理办法：把你自己的改动挪到别的分支，或手动解决冲突后再重跑。"
             exit 1
-          }
-          echo "服务端同步结果: $out"
-          echo "mode=api-merge" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 同步 tags（可选）
         if: steps.decide.outputs.go == 'true' && inputs.sync_tags != false
